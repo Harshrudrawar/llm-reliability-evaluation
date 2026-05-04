@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 # ============================================================
-# Configuration
+# Config
 # ============================================================
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 RUNS = int(os.getenv("RUNS_PER_PROMPT", "5"))
-TEMPERATURE_DEFAULT = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
 TEMPERATURES = [0.2, 0.7, 1.0]
 
 PROMPTS_FILE = "prompts.json"
@@ -23,7 +23,7 @@ client = OpenAI()
 
 
 # ============================================================
-# Utility functions
+# Helpers
 # ============================================================
 def load_prompts(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -32,13 +32,13 @@ def load_prompts(path: str) -> Dict[str, Any]:
 
 def call_model(
     prompt: str,
-    temperature: float = TEMPERATURE_DEFAULT,
+    temperature: float = DEFAULT_TEMPERATURE,
     previous_response_id: Optional[str] = None,
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, str]:
     """
     Returns:
-        output_text: the model's text response
-        response_id: the response id for chaining stateful follow-ups
+        output_text: model response text
+        response_id: response id for follow-up chaining
     """
     kwargs = {
         "model": MODEL,
@@ -50,7 +50,8 @@ def call_model(
 
     response = client.responses.create(**kwargs)
     output_text = (response.output_text or "").strip()
-    response_id = getattr(response, "id", None)
+    response_id = getattr(response, "id", "")
+
     return output_text, response_id
 
 
@@ -62,19 +63,30 @@ def save_rows(rows: List[Dict[str, Any]], path: Path) -> None:
     if not rows:
         return
 
-    fieldnames = sorted({k for row in rows for k in row.keys()})
+    fieldnames = [
+        "category",
+        "prompt_index",
+        "question_index",
+        "run",
+        "temperature",
+        "phase",
+        "prompt",
+        "context",
+        "question",
+        "challenge",
+        "previous_response_id",
+        "response_id",
+        "output",
+    ]
+
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
 
 def make_long_context_prompt(context: str, question: str) -> str:
-    return f"""Context:
-{context}
-
-Question:
-{question}"""
+    return f"Context:\n{context}\n\nQuestion:\n{question}"
 
 
 # ============================================================
@@ -83,21 +95,22 @@ Question:
 def run_consistency(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, prompt in enumerate(prompts, start=1):
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=TEMPERATURE_DEFAULT)
+            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             append_row(
                 rows,
                 {
                     "category": "consistency",
                     "prompt_index": prompt_idx,
+                    "question_index": "",
                     "run": run_idx,
-                    "temperature": TEMPERATURE_DEFAULT,
+                    "temperature": DEFAULT_TEMPERATURE,
+                    "phase": "single_turn",
                     "prompt": prompt,
                     "context": "",
                     "question": "",
                     "challenge": "",
-                    "phase": "single_turn",
                     "previous_response_id": "",
-                    "response_id": response_id or "",
+                    "response_id": response_id,
                     "output": output,
                 },
             )
@@ -105,21 +118,22 @@ def run_consistency(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
 
 def run_robustness(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, prompt in enumerate(prompts, start=1):
-        output, response_id = call_model(prompt, temperature=TEMPERATURE_DEFAULT)
+        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
         append_row(
             rows,
             {
                 "category": "robustness",
                 "prompt_index": prompt_idx,
+                "question_index": "",
                 "run": 1,
-                "temperature": TEMPERATURE_DEFAULT,
+                "temperature": DEFAULT_TEMPERATURE,
+                "phase": "single_turn",
                 "prompt": prompt,
                 "context": "",
                 "question": "",
                 "challenge": "",
-                "phase": "single_turn",
                 "previous_response_id": "",
-                "response_id": response_id or "",
+                "response_id": response_id,
                 "output": output,
             },
         )
@@ -130,13 +144,9 @@ def run_reasoning_stability(items: List[Dict[str, Any]], rows: List[Dict[str, An
         prompt = item["prompt"]
         challenge = item.get("challenge", "wrong")
 
-        # Initial repeated runs
-        last_response_id = None
-        initial_outputs = []
-
+        last_response_id = ""
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=TEMPERATURE_DEFAULT)
-            initial_outputs.append(output)
+            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             last_response_id = response_id
 
             append_row(
@@ -144,24 +154,24 @@ def run_reasoning_stability(items: List[Dict[str, Any]], rows: List[Dict[str, An
                 {
                     "category": "reasoning_stability",
                     "prompt_index": item_idx,
+                    "question_index": "",
                     "run": run_idx,
-                    "temperature": TEMPERATURE_DEFAULT,
+                    "temperature": DEFAULT_TEMPERATURE,
+                    "phase": "initial",
                     "prompt": prompt,
                     "context": "",
                     "question": "",
                     "challenge": "",
-                    "phase": "initial",
                     "previous_response_id": "",
-                    "response_id": response_id or "",
+                    "response_id": response_id,
                     "output": output,
                 },
             )
 
-        # Challenged follow-up using previous_response_id (stateful continuation)
-        challenge_prompt = f"The user says: {challenge}"
+        challenged_prompt = f"The user says: {challenge}"
         challenged_output, challenged_response_id = call_model(
-            challenge_prompt,
-            temperature=TEMPERATURE_DEFAULT,
+            challenged_prompt,
+            temperature=DEFAULT_TEMPERATURE,
             previous_response_id=last_response_id,
         )
 
@@ -170,15 +180,16 @@ def run_reasoning_stability(items: List[Dict[str, Any]], rows: List[Dict[str, An
             {
                 "category": "reasoning_stability",
                 "prompt_index": item_idx,
+                "question_index": "",
                 "run": 1,
-                "temperature": TEMPERATURE_DEFAULT,
+                "temperature": DEFAULT_TEMPERATURE,
+                "phase": "challenged",
                 "prompt": prompt,
                 "context": "",
                 "question": "",
                 "challenge": challenge,
-                "phase": "challenged",
-                "previous_response_id": last_response_id or "",
-                "response_id": challenged_response_id or "",
+                "previous_response_id": last_response_id,
+                "response_id": challenged_response_id,
                 "output": challenged_output,
             },
         )
@@ -191,7 +202,7 @@ def run_long_context(items: List[Dict[str, Any]], rows: List[Dict[str, Any]]) ->
 
         for q_idx, question in enumerate(questions, start=1):
             full_prompt = make_long_context_prompt(context, question)
-            output, response_id = call_model(full_prompt, temperature=TEMPERATURE_DEFAULT)
+            output, response_id = call_model(full_prompt, temperature=DEFAULT_TEMPERATURE)
 
             append_row(
                 rows,
@@ -200,14 +211,14 @@ def run_long_context(items: List[Dict[str, Any]], rows: List[Dict[str, Any]]) ->
                     "prompt_index": item_idx,
                     "question_index": q_idx,
                     "run": 1,
-                    "temperature": TEMPERATURE_DEFAULT,
+                    "temperature": DEFAULT_TEMPERATURE,
+                    "phase": "long_context",
                     "prompt": full_prompt,
                     "context": context,
                     "question": question,
                     "challenge": "",
-                    "phase": "long_context",
                     "previous_response_id": "",
-                    "response_id": response_id or "",
+                    "response_id": response_id,
                     "output": output,
                 },
             )
@@ -215,21 +226,22 @@ def run_long_context(items: List[Dict[str, Any]], rows: List[Dict[str, Any]]) ->
 
 def run_edge_case(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, prompt in enumerate(prompts, start=1):
-        output, response_id = call_model(prompt, temperature=TEMPERATURE_DEFAULT)
+        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
         append_row(
             rows,
             {
                 "category": "edge_case",
                 "prompt_index": prompt_idx,
+                "question_index": "",
                 "run": 1,
-                "temperature": TEMPERATURE_DEFAULT,
+                "temperature": DEFAULT_TEMPERATURE,
+                "phase": "single_turn",
                 "prompt": prompt,
                 "context": "",
                 "question": "",
                 "challenge": "",
-                "phase": "single_turn",
                 "previous_response_id": "",
-                "response_id": response_id or "",
+                "response_id": response_id,
                 "output": output,
             },
         )
@@ -238,21 +250,22 @@ def run_edge_case(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
 def run_response_variance(prompts: List[str], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, prompt in enumerate(prompts, start=1):
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=TEMPERATURE_DEFAULT)
+            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             append_row(
                 rows,
                 {
                     "category": "response_variance",
                     "prompt_index": prompt_idx,
+                    "question_index": "",
                     "run": run_idx,
-                    "temperature": TEMPERATURE_DEFAULT,
+                    "temperature": DEFAULT_TEMPERATURE,
+                    "phase": "variance",
                     "prompt": prompt,
                     "context": "",
                     "question": "",
                     "challenge": "",
-                    "phase": "variance",
                     "previous_response_id": "",
-                    "response_id": response_id or "",
+                    "response_id": response_id,
                     "output": output,
                 },
             )
@@ -267,15 +280,16 @@ def run_parameter_sensitivity(prompts: List[str], rows: List[Dict[str, Any]]) ->
                 {
                     "category": "parameter_sensitivity",
                     "prompt_index": prompt_idx,
+                    "question_index": "",
                     "run": 1,
                     "temperature": temp,
+                    "phase": "parameter_sensitivity",
                     "prompt": prompt,
                     "context": "",
                     "question": "",
                     "challenge": "",
-                    "phase": "parameter_sensitivity",
                     "previous_response_id": "",
-                    "response_id": response_id or "",
+                    "response_id": response_id,
                     "output": output,
                 },
             )
