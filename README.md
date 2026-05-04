@@ -65,13 +65,13 @@ The detailed methodology is defined in `methodology.md`.
 
 Each dimension is normalized to a score in [0,1] and aggregated using a weighted formulation:
 
-\[
-R_{final} = \sum_{i=1}^{7} w_i D_i
-\]
+Final Reliability Score:
+
+R_final = w₁C + w₂R + w₃S + w₄L + w₅E + w₆V + w₇T
 
 Where:
-- \(D_i\) represents each reliability dimension  
-- \(w_i\) represents the corresponding weight  
+- C, R, S, L, E, V, T represent reliability dimensions
+- w₁, w₂, ..., w₇ are corresponding weights  
 
 ### Semantic Similarity
 
