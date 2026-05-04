@@ -47,18 +47,15 @@ The scoring system is defined in `methodology.md`.
 
 ## Project Structure
 
-```text
-reliability_eval/
-├── prompts.json
-├── run_experiments.py
-├── score_results.py
-├── methodology.md
-├── README.md
-└── results/
-    ├── raw_outputs.csv
-    └── scores.csv
+- `prompts.json` — structured test prompts per dimension
+- `run_experiments.py` — executes model calls and logs outputs
+- `score_results.py` — computes reliability scores
+- `methodology.md` — full evaluation framework
+- `README.md` — project documentation
+- `results/raw_outputs.csv` — collected model outputs
+- `results/scores.csv` — computed scores
 
-    
+
 ## Implementation Status
 
 - Prototype evaluation framework completed  
