@@ -82,19 +82,19 @@ Semantic similarity is computed using embedding-based cosine similarity rather t
 
 Dimension scores are combined using normalized weights:
 
-**Final Reliability Score**
+### Final Reliability Score
 
-[
-R_{final}=100\times\sum_i w_iD_i
-]
+The final reliability score is computed as:
 
-where
+**R_final = 100 × Σ(w_i × D_i)**
 
-* (D_i) = normalized score of reliability dimension *i*
-* (w_i) = normalized dimension weight
-* (\sum_i w_i = 1)
+where:
 
-The final score is therefore reported on a **0–100 scale**.
+- **D_i** = normalized score of reliability dimension *i*
+- **w_i** = normalized weight of dimension *i*
+- **Σw_i = 1**
+
+The final reliability score is therefore reported on a **0–100 scale**.
 
 ---
 
