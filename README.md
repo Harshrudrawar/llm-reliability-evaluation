@@ -86,13 +86,13 @@ Dimension scores are combined using normalized weights:
 
 The final reliability score is computed as:
 
-**R_final = 100 × Σ(w_i × D_i)**
+**R_final = 100 × Σ(wᵢ × Dᵢ)**
 
 where:
 
-- **D_i** = normalized score of reliability dimension *i*
-- **w_i** = normalized weight of dimension *i*
-- **Σw_i = 1**
+- **Dᵢ** = normalized score of reliability dimension *i*
+- **wᵢ** = normalized weight of dimension *i*
+- **Σwᵢ = 1**
 
 The final reliability score is therefore reported on a **0–100 scale**.
 
