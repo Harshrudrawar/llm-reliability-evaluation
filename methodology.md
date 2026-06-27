@@ -129,16 +129,13 @@ Average semantic similarity across responses generated from grouped paraphrased 
 ---
 
 ## 5.3 Reasoning Stability
-
-[
-S = 0.4C + 0.3I + 0.3H
-]
+**S = 0.4 × C + 0.3 × I + 0.3 × H**
 
 where
 
-* (C) = consistency
-* (I) = initial correctness
-* (H) = challenged-response correctness
+- **C** = consistency
+- **I** = initial correctness
+- **H** = challenged-response correctness
 
 ---
 
