@@ -31,6 +31,7 @@ random.seed(SEED)
 CSV_FIELDS = [
     "category",
     "prompt_index",
+    "group_id",
     "question_index",
     "run",
     "temperature",
@@ -62,6 +63,28 @@ def stringify_reference(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def as_dict(item: Any) -> Dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        return {"prompt": item}
+    raise TypeError(f"Unsupported prompt item type: {type(item)!r}")
+
+
+def get_item_prompt(item: Any) -> str:
+    return str(as_dict(item).get("prompt", "")).strip()
+
+
+def get_group_id(category: str, item: Any, prompt_index: int, fallback: Optional[str] = None) -> str:
+    spec = as_dict(item)
+    group_id = str(spec.get("group_id", "")).strip()
+    if group_id:
+        return group_id
+    if fallback:
+        return fallback
+    return f"{category}:{prompt_index}"
+
+
 def call_model(
     prompt: str,
     temperature: float = DEFAULT_TEMPERATURE,
@@ -88,8 +111,7 @@ def call_model(
             last_error = exc
             if attempt == MAX_RETRIES:
                 raise RuntimeError(f"Model call failed after {MAX_RETRIES} attempts: {exc}") from exc
-            sleep_for = RETRY_BACKOFF_SECONDS * attempt
-            time.sleep(sleep_for)
+            time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
     raise RuntimeError(f"Model call failed: {last_error}")
 
@@ -102,6 +124,7 @@ def make_row(
     *,
     category: str,
     prompt_index: int,
+    group_id: str = "",
     question_index: Any = "",
     run: Any = 1,
     temperature: Any = DEFAULT_TEMPERATURE,
@@ -118,6 +141,7 @@ def make_row(
     return {
         "category": category,
         "prompt_index": prompt_index,
+        "group_id": group_id,
         "question_index": question_index,
         "run": run,
         "temperature": temperature,
@@ -151,24 +175,20 @@ def save_manifest(prompts_data: Dict[str, Any], path: Path) -> None:
         "temperatures": TEMPERATURES,
         "seed": SEED,
         "categories": sorted(prompts_data.keys()),
+        "output_files": {
+            "raw_outputs_csv": str(RAW_OUTPUT_FILE),
+            "manifest_json": str(MANIFEST_FILE),
+        },
+        "row_schema": CSV_FIELDS,
+        "grouping": {
+            "robustness": "shared group_id across paraphrases",
+            "response_variance": "shared group_id across prompt variants",
+            "parameter_sensitivity": "grouped by prompt across temperatures",
+            "reasoning_stability": "grouped by prompt with initial/challenge phases",
+            "user_pressure": "grouped by prompt with initial/challenge phases",
+        },
     }
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def get_item_prompt(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        return str(item.get("prompt", "")).strip()
-    raise TypeError(f"Unsupported prompt item type: {type(item)!r}")
-
-
-def get_dict_item(item: Any) -> Dict[str, Any]:
-    if isinstance(item, dict):
-        return item
-    if isinstance(item, str):
-        return {"prompt": item}
-    raise TypeError(f"Unsupported prompt item type: {type(item)!r}")
 
 
 def make_long_context_prompt(context: str, question: str) -> str:
@@ -181,56 +201,72 @@ def make_long_context_prompt(context: str, question: str) -> str:
 def run_consistency(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
+        group_id = get_group_id("consistency", item, prompt_idx)
         for run_idx in range(1, RUNS + 1):
             output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
-            append_row(rows, make_row(
-                category="consistency",
+            append_row(
+                rows,
+                make_row(
+                    category="consistency",
+                    prompt_index=prompt_idx,
+                    group_id=group_id,
+                    run=run_idx,
+                    phase="single_turn",
+                    prompt=prompt,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
+
+
+def run_robustness(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    """Run each paraphrase once, but give the scorer a shared group_id for the set."""
+    for prompt_idx, item in enumerate(items, start=1):
+        prompt = get_item_prompt(item)
+        group_id = get_group_id("robustness", item, prompt_idx, fallback="robustness:shared")
+        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+        append_row(
+            rows,
+            make_row(
+                category="robustness",
                 prompt_index=prompt_idx,
-                run=run_idx,
+                group_id=group_id,
+                run=1,
                 phase="single_turn",
                 prompt=prompt,
                 output=output,
                 response_id=response_id,
-            ))
-
-
-def run_robustness(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
-    for prompt_idx, item in enumerate(items, start=1):
-        prompt = get_item_prompt(item)
-        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
-        append_row(rows, make_row(
-            category="robustness",
-            prompt_index=prompt_idx,
-            run=1,
-            phase="single_turn",
-            prompt=prompt,
-            output=output,
-            response_id=response_id,
-        ))
+            ),
+        )
 
 
 def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for item_idx, item in enumerate(items, start=1):
-        spec = get_dict_item(item)
+        spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         challenge = str(spec.get("challenge", "")).strip()
         answer = stringify_reference(spec.get("answer", ""))
+        group_id = get_group_id("reasoning_stability", item, item_idx)
 
         last_response_id = ""
         for run_idx in range(1, RUNS + 1):
             output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             last_response_id = response_id
-            append_row(rows, make_row(
-                category="reasoning_stability",
-                prompt_index=item_idx,
-                run=run_idx,
-                phase="initial",
-                prompt=prompt,
-                challenge=challenge,
-                reference=answer,
-                output=output,
-                response_id=response_id,
-            ))
+            append_row(
+                rows,
+                make_row(
+                    category="reasoning_stability",
+                    prompt_index=item_idx,
+                    group_id=group_id,
+                    run=run_idx,
+                    phase="initial",
+                    prompt=prompt,
+                    challenge=challenge,
+                    reference=answer,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
 
         challenged_prompt = challenge or "Please reconsider your answer."
         challenged_output, challenged_response_id = call_model(
@@ -238,105 +274,129 @@ def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) ->
             temperature=DEFAULT_TEMPERATURE,
             previous_response_id=last_response_id,
         )
-        append_row(rows, make_row(
-            category="reasoning_stability",
-            prompt_index=item_idx,
-            run=1,
-            phase="challenge",
-            prompt=prompt,
-            challenge=challenged_prompt,
-            reference=answer,
-            previous_response_id=last_response_id,
-            output=challenged_output,
-            response_id=challenged_response_id,
-        ))
+        append_row(
+            rows,
+            make_row(
+                category="reasoning_stability",
+                prompt_index=item_idx,
+                group_id=group_id,
+                run=1,
+                phase="challenge",
+                prompt=prompt,
+                challenge=challenged_prompt,
+                reference=answer,
+                previous_response_id=last_response_id,
+                output=challenged_output,
+                response_id=challenged_response_id,
+            ),
+        )
 
 
 def run_long_context(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for item_idx, item in enumerate(items, start=1):
-        spec = get_dict_item(item)
+        spec = as_dict(item)
         context = str(spec.get("context", "")).strip()
         questions = spec.get("questions", [])
+        group_id = get_group_id("long_context", item, item_idx)
 
         for q_idx, qspec in enumerate(questions, start=1):
-            qspec = get_dict_item(qspec)
+            qspec = as_dict(qspec)
             question = str(qspec.get("question", "")).strip()
             answers = qspec.get("answers", [])
             full_prompt = make_long_context_prompt(context, question)
             output, response_id = call_model(full_prompt, temperature=DEFAULT_TEMPERATURE)
-            append_row(rows, make_row(
-                category="long_context",
-                prompt_index=item_idx,
-                question_index=q_idx,
-                run=1,
-                phase="long_context",
-                prompt=full_prompt,
-                context=context,
-                question=question,
-                reference=answers,
-                output=output,
-                response_id=response_id,
-            ))
+            append_row(
+                rows,
+                make_row(
+                    category="long_context",
+                    prompt_index=item_idx,
+                    group_id=group_id,
+                    question_index=q_idx,
+                    run=1,
+                    phase="long_context",
+                    prompt=full_prompt,
+                    context=context,
+                    question=question,
+                    reference=answers,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
 
 
 def run_edge_case(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, item in enumerate(items, start=1):
-        spec = get_dict_item(item)
+        spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         expected = stringify_reference(spec.get("expected", ""))
+        group_id = get_group_id("edge_case", item, prompt_idx)
         output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
-        append_row(rows, make_row(
-            category="edge_case",
-            prompt_index=prompt_idx,
-            run=1,
-            phase="single_turn",
-            prompt=prompt,
-            reference=expected,
-            output=output,
-            response_id=response_id,
-        ))
+        append_row(
+            rows,
+            make_row(
+                category="edge_case",
+                prompt_index=prompt_idx,
+                group_id=group_id,
+                run=1,
+                phase="single_turn",
+                prompt=prompt,
+                reference=expected,
+                output=output,
+                response_id=response_id,
+            ),
+        )
 
 
 def run_uncertainty_calibration(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, item in enumerate(items, start=1):
-        spec = get_dict_item(item)
+        spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         expected = stringify_reference(spec.get("expected", ""))
+        group_id = get_group_id("uncertainty_calibration", item, prompt_idx)
         output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
-        append_row(rows, make_row(
-            category="uncertainty_calibration",
-            prompt_index=prompt_idx,
-            run=1,
-            phase="single_turn",
-            prompt=prompt,
-            reference=expected,
-            output=output,
-            response_id=response_id,
-        ))
+        append_row(
+            rows,
+            make_row(
+                category="uncertainty_calibration",
+                prompt_index=prompt_idx,
+                group_id=group_id,
+                run=1,
+                phase="single_turn",
+                prompt=prompt,
+                reference=expected,
+                output=output,
+                response_id=response_id,
+            ),
+        )
 
 
 def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for item_idx, item in enumerate(items, start=1):
-        spec = get_dict_item(item)
+        spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         challenge = str(spec.get("challenge", "")).strip()
         answer = stringify_reference(spec.get("answer", ""))
+        group_id = get_group_id("user_pressure", item, item_idx)
 
         last_response_id = ""
         for run_idx in range(1, RUNS + 1):
             output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             last_response_id = response_id
-            append_row(rows, make_row(
-                category="user_pressure",
-                prompt_index=item_idx,
-                run=run_idx,
-                phase="initial",
-                prompt=prompt,
-                challenge=challenge,
-                reference=answer,
-                output=output,
-                response_id=response_id,
-            ))
+            append_row(
+                rows,
+                make_row(
+                    category="user_pressure",
+                    prompt_index=item_idx,
+                    group_id=group_id,
+                    run=run_idx,
+                    phase="initial",
+                    prompt=prompt,
+                    challenge=challenge,
+                    reference=answer,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
 
         pressure_prompt = challenge or "Please confirm my incorrect statement."
         pressured_output, pressured_response_id = call_model(
@@ -344,51 +404,67 @@ def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
             temperature=DEFAULT_TEMPERATURE,
             previous_response_id=last_response_id,
         )
-        append_row(rows, make_row(
-            category="user_pressure",
-            prompt_index=item_idx,
-            run=1,
-            phase="challenge",
-            prompt=prompt,
-            challenge=pressure_prompt,
-            reference=answer,
-            previous_response_id=last_response_id,
-            output=pressured_output,
-            response_id=pressured_response_id,
-        ))
+        append_row(
+            rows,
+            make_row(
+                category="user_pressure",
+                prompt_index=item_idx,
+                group_id=group_id,
+                run=1,
+                phase="challenge",
+                prompt=prompt,
+                challenge=pressure_prompt,
+                reference=answer,
+                previous_response_id=last_response_id,
+                output=pressured_output,
+                response_id=pressured_response_id,
+            ),
+        )
 
 
 def run_response_variance(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    """Run variants under a shared group so the scorer can compare phrasing diversity."""
+    shared_group = "response_variance:shared"
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
+        group_id = get_group_id("response_variance", item, prompt_idx, fallback=shared_group)
         for run_idx in range(1, RUNS + 1):
             output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
-            append_row(rows, make_row(
-                category="response_variance",
-                prompt_index=prompt_idx,
-                run=run_idx,
-                phase="variance",
-                prompt=prompt,
-                output=output,
-                response_id=response_id,
-            ))
+            append_row(
+                rows,
+                make_row(
+                    category="response_variance",
+                    prompt_index=prompt_idx,
+                    group_id=group_id,
+                    run=run_idx,
+                    phase="variance",
+                    prompt=prompt,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
 
 
 def run_parameter_sensitivity(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
+        group_id = get_group_id("parameter_sensitivity", item, prompt_idx)
         for temp in TEMPERATURES:
             output, response_id = call_model(prompt, temperature=temp)
-            append_row(rows, make_row(
-                category="parameter_sensitivity",
-                prompt_index=prompt_idx,
-                run=1,
-                temperature=temp,
-                phase="temperature_sweep",
-                prompt=prompt,
-                output=output,
-                response_id=response_id,
-            ))
+            append_row(
+                rows,
+                make_row(
+                    category="parameter_sensitivity",
+                    prompt_index=prompt_idx,
+                    group_id=group_id,
+                    run=1,
+                    temperature=temp,
+                    phase="temperature_sweep",
+                    prompt=prompt,
+                    output=output,
+                    response_id=response_id,
+                ),
+            )
 
 
 # ============================================================

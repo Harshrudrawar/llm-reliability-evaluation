@@ -2,84 +2,139 @@
 
 ## Overview
 
-This project implements a structured evaluation framework for measuring the reliability of large language models (LLMs). Unlike traditional evaluation approaches that focus primarily on accuracy, this framework evaluates reliability as a multi-dimensional behavioral property.
+This project implements a structured evaluation framework for measuring the reliability of Large Language Models (LLMs). Unlike traditional evaluation approaches that primarily focus on accuracy, this framework evaluates reliability as a multi-dimensional behavioral property.
 
-The module is designed to assess how consistently and robustly a model behaves under repeated queries, prompt variations, reasoning challenges, long-context inputs, uncertainty, and user pressure.
+The module assesses how consistently and robustly an LLM behaves under repeated queries, prompt variations, reasoning challenges, long-context inputs, uncertainty, user pressure, and generation parameter changes.
+
+The implementation follows a **generate → score** pipeline, allowing model responses to be collected once and re-scored multiple times without repeating API calls.
 
 ---
 
 ## Motivation
 
-Modern LLMs often achieve high accuracy on benchmark tasks, yet exhibit inconsistent behavior when subjected to:
+Modern LLMs often achieve high benchmark accuracy while still exhibiting inconsistent behavior under different interaction conditions. Small changes in wording, user pressure, or sampling parameters can produce substantially different responses.
 
-- repeated queries  
-- prompt variations  
-- ambiguous reasoning tasks  
-- long-context inputs  
-- user-driven interaction  
-- uncertain or underspecified questions  
+Reliability therefore extends beyond correctness and includes:
 
-This highlights the need for **reliability-focused evaluation**, where correctness alone is insufficient.
+* Output consistency
+* Robustness to prompt variation
+* Stability of reasoning
+* Long-context performance
+* Appropriate uncertainty handling
+* Resistance to user pressure
+* Stability across decoding parameters
 
 ---
 
 ## Core Idea
 
-> Reliability is not defined solely by correctness, but by the **stability and consistency of model behavior across interaction scenarios**.
+> Reliability is not defined solely by correctness, but by the stability and consistency of model behavior across diverse interaction scenarios.
 
 ---
 
 ## Evaluation Dimensions
 
-The framework evaluates reliability across nine dimensions:
+The framework evaluates nine complementary reliability dimensions:
 
-- Output Consistency  
-- Prompt Robustness  
-- Reasoning Stability  
-- Long-Context Reliability  
-- Edge Case Handling  
-- Uncertainty Calibration  
-- User Pressure Stability  
-- Response Variance  
-- Parameter Sensitivity  
+* Output Consistency
+* Prompt Robustness
+* Reasoning Stability
+* Long-Context Reliability
+* Edge Case Handling
+* Uncertainty Calibration
+* User Pressure Stability
+* Response Variance
+* Parameter Sensitivity
 
-Each dimension is scored independently and combined into a weighted reliability score.
-
----
-
-## Methodology
-
-The evaluation process follows a structured pipeline:
-
-1. Define prompts for each reliability dimension  
-2. Execute prompts multiple times  
-3. Collect model responses  
-4. Compare outputs using:
-   - embedding-based cosine similarity  
-   - task-specific evaluation rules  
-5. Compute dimension-wise scores  
-6. Aggregate scores into a final reliability metric  
-7. Inspect representative evidence and risk flags  
-
-The detailed methodology is defined in `methodology.md`.
+Each dimension is evaluated independently before being aggregated into an overall reliability score.
 
 ---
 
-## Scoring
+## Evaluation Pipeline
 
-Each dimension is normalized to a score in [0,1] and aggregated using a weighted formulation:
+The evaluation consists of two independent stages.
 
-Final Reliability Score:
+### Stage 1 — Experiment Execution
 
-R_final = w₁C + w₂R + w₃S + w₄L + w₅E + w₆U + w₇P + w₈V + w₉T
+* Load benchmark prompts
+* Execute prompts through the selected LLM
+* Store every response in a structured CSV
+* Preserve conversation chains for multi-turn evaluations
+* Save experiment metadata
 
-Where:
-- C, R, S, L, E, U, P, V, T represent reliability dimensions
-- w₁, w₂, ..., w₉ are corresponding weights  
+### Stage 2 — Automated Scoring
 
-### Semantic Similarity
+* Load generated responses
+* Compute semantic similarity using embeddings
+* Score each reliability dimension
+* Aggregate weighted scores
+* Generate detailed reports and risk flags
 
-Semantic similarity between responses is computed using **embedding-based cosine similarity**, enabling a more robust and scalable evaluation compared to manual or string-based approaches.
+Separating generation from scoring allows experiments to be re-scored without additional API cost.
+
+---
+
+## Scoring Methodology
+
+Each reliability dimension produces a normalized score between **0 and 1**.
+
+Semantic similarity is computed using embedding-based cosine similarity rather than exact string matching.
+
+Dimension scores are combined using normalized weights:
+
+**Final Reliability Score**
+
+[
+R_{final}=100\times\sum_i w_iD_i
+]
+
+where
+
+* (D_i) = normalized score of reliability dimension *i*
+* (w_i) = normalized dimension weight
+* (\sum_i w_i = 1)
+
+The final score is therefore reported on a **0–100 scale**.
+
+---
+
+## Reliability Dimensions
+
+### Output Consistency
+
+Repeated execution of identical prompts measures response stability.
+
+### Prompt Robustness
+
+Semantically equivalent paraphrases are grouped together and evaluated for response consistency across prompt variations.
+
+### Reasoning Stability
+
+Models are evaluated before and after being challenged to determine whether logically correct reasoning remains stable.
+
+### Long-Context Reliability
+
+Measures retrieval and reasoning performance over extended passages.
+
+### Edge Case Handling
+
+Evaluates responses to impossible, fictional, or underspecified questions.
+
+### Uncertainty Calibration
+
+Measures whether the model appropriately expresses uncertainty when the correct answer cannot be known.
+
+### User Pressure Stability
+
+Measures resistance to incorrect user suggestions or social pressure.
+
+### Response Variance
+
+Evaluates consistency across alternative prompt formulations describing the same underlying task.
+
+### Parameter Sensitivity
+
+Measures stability under different decoding temperatures.
 
 ---
 
@@ -87,64 +142,87 @@ Semantic similarity between responses is computed using **embedding-based cosine
 
 ```text
 llm-reliability-evaluation/
-├── .gitignore
-├── README.md
-├── methodology.md
 ├── prompts.json
 ├── run_experiments.py
-└── score_results.py
+├── score_results.py
+├── methodology.md
+├── README.md
+└── results/
 ```
 
 ---
 
-## Implementation Status
+## Output Files
 
-- Reliability evaluation framework fully defined  
-- Expanded test set across nine dimensions  
-- Prototype pipeline for automated evaluation completed  
-- Embedding-based cosine similarity integrated for scoring  
-- Risk flags, evidence logging, and summary reporting added  
-- Codebase structured for API-based execution  
+Running the framework produces:
+
+* raw_outputs.csv
+* experiment_manifest.json
+* scores.csv
+* summary.json
+* item_analysis.json
+
+These artifacts preserve both raw evidence and summarized reliability metrics.
 
 ---
 
-## Limitations
+## Current Features
 
-- Limited number of prompts and runs (prototype scale)  
-- Single-model baseline for the current version  
-- Parameter sensitivity is approximated with temperature sweeps  
-- Scoring thresholds may require tuning for large-scale deployment  
+* Multi-dimensional reliability evaluation
+* Multi-turn reasoning evaluation
+* Prompt robustness analysis
+* Long-context evaluation
+* Embedding-based semantic scoring
+* Automated report generation
+* Risk flag detection
+* Response provenance tracking
+* Separate generation and scoring pipeline
+
+---
+
+## Current Limitations
+
+This repository represents a research prototype.
+
+Current limitations include:
+
+* Prototype-scale benchmark dataset
+* Single-provider implementation
+* Embedding-based automated scoring
+* Limited statistical validation
+* No human evaluation calibration
+
+These limitations are documented explicitly to encourage future improvements.
 
 ---
 
 ## Future Work
 
-- Expand evaluation to multiple models (GPT, Claude, Gemini)  
-- Increase dataset size for statistical robustness  
-- Refine thresholds using manual sanity checks  
-- Integrate API-based large-scale automated evaluation  
-- Extend the module toward the broader AI Trust platform  
+Planned improvements include:
+
+* Multi-model evaluation (GPT, Claude, Gemini)
+* Larger benchmark datasets
+* Statistical confidence intervals
+* Human-in-the-loop evaluation
+* Provider abstraction layer
+* Benchmark packaging
+* Integration into the broader AI Trust platform
 
 ---
 
 ## Integration
 
-This module is designed to integrate into a unified AI trust evaluation platform, alongside dimensions such as:
+The Reliability Evaluation Module is designed to become one component of a larger AI Trust Evaluation Framework alongside:
 
-- Manipulation detection  
-- Veracity (factual correctness)  
-- Cultural sensitivity  
-- Psychological safety  
-
----
-
-## Contribution
-
-This work introduces an interaction-centric reliability evaluation framework, demonstrating that LLM trustworthiness depends not only on accuracy, but on the consistency and stability of behavior under repeated queries, prompt variations, uncertainty, and user interaction.
+* Veracity Evaluation
+* Manipulation Detection
+* Cultural Sensitivity
+* Psychological Safety
 
 ---
 
 ## Author
 
-Harsh Rudrawar  
+**Harsh Rudrawar**
+
 USC AI Trust Lab

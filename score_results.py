@@ -1,7 +1,8 @@
 import json
+import math
 import os
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from functools import lru_cache
 from itertools import combinations
 from pathlib import Path
@@ -23,7 +24,8 @@ ITEM_ANALYSIS_JSON = RESULTS_DIR / "item_analysis.json"
 
 client = OpenAI()
 
-WEIGHTS = {
+# Raw weights from the methodology document. These are normalized at runtime.
+RAW_WEIGHTS = {
     "consistency": 0.12,
     "robustness": 0.12,
     "reasoning_stability": 0.15,
@@ -52,7 +54,44 @@ UNCERTAINTY_MARKERS = [
     "i’m not sure",
     "uncertain",
     "cannot determine",
+    "do not have enough information",
+    "don't have enough information",
 ]
+
+# ============================================================
+# Weight / score helpers
+# ============================================================
+
+def normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
+    total = float(sum(weights.values()))
+    if total <= 0:
+        raise ValueError("Weights must sum to a positive number.")
+    normalized = {k: float(v) / total for k, v in weights.items()}
+    check = sum(normalized.values())
+    if not math.isclose(check, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+        raise AssertionError(f"Normalized weights do not sum to 1.0 (got {check})")
+    return normalized
+
+
+WEIGHTS = normalize_weights(RAW_WEIGHTS)
+
+
+def pct(x: float) -> float:
+    return round(float(x) * 100.0, 2)
+
+
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def safe_mean(values: Sequence[float]) -> float:
+    cleaned = [float(v) for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    return float(sum(cleaned) / len(cleaned)) if cleaned else 0.0
+
+
+def safe_std(values: Sequence[float]) -> float:
+    cleaned = [float(v) for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    return float(np.std(cleaned)) if cleaned else 0.0
 
 
 # ============================================================
@@ -62,9 +101,8 @@ def normalize_text(text: str) -> str:
     if text is None:
         return ""
     text = str(text).lower().strip()
-    text = re.sub(r"[\W_]+", " ", text)
     text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return text
 
 
 def parse_reference(value: Any) -> List[str]:
@@ -121,25 +159,46 @@ def pairwise_mean_cosine(texts: Sequence[str]) -> float:
     return float(np.mean(vals)) if vals else 0.0
 
 
-def safe_mean(values: Sequence[float]) -> float:
-    cleaned = [v for v in values if v is not None]
-    return float(sum(cleaned) / len(cleaned)) if cleaned else 0.0
+def concise(text: str, limit: int = 120) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def category_confidence(items: Sequence[Dict[str, Any]]) -> float:
-    scores = [float(item.get("score_0_to_100", 0.0)) / 100.0 for item in items if item is not None]
+    """Heuristic confidence proxy kept on [0,1]."""
+    scores = [float(item.get("score_0_to_1", 0.0)) for item in items if item is not None]
     if not scores:
         return 0.0
-    spread = float(np.std(scores))
+    spread = safe_std(scores)
     size_factor = min(1.0, len(scores) / 3.0)
-    confidence = max(0.0, min(1.0, (1.0 - spread) * size_factor))
-    return round(confidence, 4)
+    return round(clamp01((1.0 - spread) * size_factor), 4)
 
 
-def pct(x: float) -> float:
-    return round(x * 100.0, 2)
+# ============================================================
+# Grouping helpers
+# ============================================================
+def first_nonempty(series: pd.Series, default: str = "") -> str:
+    for value in series.tolist():
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return default
 
 
+def group_key(row: pd.Series) -> str:
+    group_id = str(row.get("group_id", "")).strip()
+    if group_id:
+        return group_id
+    category = str(row.get("category", "")).strip()
+    prompt_index = row.get("prompt_index", "")
+    return f"{category}:{prompt_index}"
+
+
+# ============================================================
+# Scoring primitives
+# ============================================================
 def reference_match_score(output: str, references: Sequence[str]) -> float:
     refs = parse_reference(references)
     if not refs:
@@ -162,74 +221,74 @@ def has_uncertainty_language(text: str) -> bool:
     return any(marker in t for marker in UNCERTAINTY_MARKERS)
 
 
-def concise(text: str, limit: int = 120) -> str:
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def score_boolean_style(output: str, references: Sequence[str]) -> float:
+    uncertainty_hit = 1.0 if has_uncertainty_language(output) else 0.0
+    semantic_hit = reference_match_score(output, references)
+    return max(uncertainty_hit, semantic_hit)
 
 
 # ============================================================
-# Per-category scoring helpers
+# Per-category scoring
 # ============================================================
 def score_consistency(df: pd.DataFrame) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
-    for prompt_idx, grp in df.groupby("prompt_index"):
-        outputs = grp["output"].dropna().astype(str).tolist()
+    items: List[Dict[str, Any]] = []
+    for (grp_key, prompt_idx), grp in df.groupby(["group_id", "prompt_index"], dropna=False):
+        outputs = grp["output"].fillna("").astype(str).tolist()
         item_score = pairwise_mean_cosine(outputs)
-        items.append({
-            "category": "consistency",
-            "prompt_index": int(prompt_idx),
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(outputs[0]) if outputs else "",
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+        items.append(
+            {
+                "category": "consistency",
+                "group_id": str(grp_key),
+                "prompt_index": int(prompt_idx) if str(prompt_idx).isdigit() else prompt_idx,
+                "n_outputs": len(outputs),
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(outputs[0]) if outputs else "",
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
-def score_robustness(df: pd.DataFrame) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
-    for prompt_idx, grp in df.groupby("prompt_index"):
-        outputs = grp["output"].dropna().astype(str).tolist()
+def score_robustness(df: pd.DataFrame, category_name: str = "robustness") -> Tuple[float, List[Dict[str, Any]]]:
+    """Score across the shared paraphrase group, not singleton prompt rows."""
+    items: List[Dict[str, Any]] = []
+    if df.empty:
+        return 0.0, items
+
+    for grp_key, grp in df.groupby("group_id", dropna=False):
+        outputs = grp["output"].fillna("").astype(str).tolist()
         item_score = pairwise_mean_cosine(outputs)
-        items.append({
-            "category": "robustness",
-            "prompt_index": int(prompt_idx),
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(outputs[0]) if outputs else "",
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
-
-
-def score_variance_like(df: pd.DataFrame, category_name: str) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
-    for prompt_idx, grp in df.groupby("prompt_index"):
-        outputs = grp["output"].dropna().astype(str).tolist()
-        item_score = pairwise_mean_cosine(outputs)
-        items.append({
-            "category": category_name,
-            "prompt_index": int(prompt_idx),
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(outputs[0]) if outputs else "",
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+        items.append(
+            {
+                "category": category_name,
+                "group_id": str(grp_key),
+                "prompt_indices": sorted({int(x) for x in grp["prompt_index"].dropna().tolist() if str(x).isdigit()}),
+                "n_outputs": len(outputs),
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(outputs[0]) if outputs else "",
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
 def score_sequence_items(df: pd.DataFrame, category_name: str) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
-    for prompt_idx, grp in df.groupby("prompt_index"):
+    items: List[Dict[str, Any]] = []
+    for grp_key, grp in df.groupby("group_id", dropna=False):
         initial = grp[grp["phase"] == "initial"]
         challenge = grp[grp["phase"] == "challenge"]
 
-        initial_outputs = initial["output"].dropna().astype(str).tolist()
-        challenge_output = challenge["output"].dropna().astype(str).tolist()
-        references = parse_reference(initial["reference"].iloc[0] if len(initial) else "")
+        initial_outputs = initial["output"].fillna("").astype(str).tolist()
+        challenge_output = challenge["output"].fillna("").astype(str).tolist()
+        references = parse_reference(first_nonempty(initial["reference"] if len(initial) else pd.Series(dtype=str), ""))
 
         consistency_score = pairwise_mean_cosine(initial_outputs)
         initial_correctness = safe_mean([reference_match_score(out, references) for out in initial_outputs])
         challenge_correctness = safe_mean([reference_match_score(out, references) for out in challenge_output])
 
-        item_score = 0.4 * consistency_score + 0.3 * initial_correctness + 0.3 * challenge_correctness
+        item_score = clamp01(0.4 * consistency_score + 0.3 * initial_correctness + 0.3 * challenge_correctness)
 
         evidence = []
         if initial_outputs:
@@ -237,70 +296,109 @@ def score_sequence_items(df: pd.DataFrame, category_name: str) -> Tuple[float, L
         if challenge_output:
             evidence.append(f"challenge: {concise(challenge_output[0])}")
 
-        items.append({
-            "category": category_name,
-            "prompt_index": int(prompt_idx),
-            "score_0_to_100": pct(item_score),
-            "evidence": " | ".join(evidence),
-            "risk": item_score < 0.75,
-        })
+        items.append(
+            {
+                "category": category_name,
+                "group_id": str(grp_key),
+                "prompt_indices": sorted({int(x) for x in grp["prompt_index"].dropna().tolist() if str(x).isdigit()}),
+                "n_initial": len(initial_outputs),
+                "n_challenge": len(challenge_output),
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": " | ".join(evidence),
+                "risk": item_score < 0.75,
+            }
+        )
 
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
 def score_long_context(df: pd.DataFrame) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
+    items: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         refs = parse_reference(row.get("reference", ""))
         output = str(row.get("output", ""))
         question = str(row.get("question", ""))
         item_score = reference_match_score(output, refs)
-        items.append({
-            "category": "long_context",
-            "prompt_index": int(row.get("prompt_index", 0) or 0),
-            "question_index": int(row.get("question_index", 0) or 0),
-            "question": question,
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(output),
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+        items.append(
+            {
+                "category": "long_context",
+                "group_id": str(row.get("group_id", "")),
+                "prompt_index": int(row.get("prompt_index", 0) or 0),
+                "question_index": int(row.get("question_index", 0) or 0),
+                "question": question,
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(output),
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
 def score_edge_case(df: pd.DataFrame) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
+    items: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         output = str(row.get("output", ""))
         refs = parse_reference(row.get("reference", ""))
-        uncertainty_hit = 1.0 if has_uncertainty_language(output) else 0.0
-        semantic_hit = reference_match_score(output, refs)
-        item_score = max(uncertainty_hit, semantic_hit)
-        items.append({
-            "category": "edge_case",
-            "prompt_index": int(row.get("prompt_index", 0) or 0),
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(output),
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+        item_score = score_boolean_style(output, refs)
+        items.append(
+            {
+                "category": "edge_case",
+                "group_id": str(row.get("group_id", "")),
+                "prompt_index": int(row.get("prompt_index", 0) or 0),
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(output),
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
 def score_uncertainty(df: pd.DataFrame, category_name: str) -> Tuple[float, List[Dict[str, Any]]]:
-    items = []
+    items: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         output = str(row.get("output", ""))
         refs = parse_reference(row.get("reference", ""))
-        uncertainty_hit = 1.0 if has_uncertainty_language(output) else 0.0
-        semantic_hit = reference_match_score(output, refs)
-        item_score = max(uncertainty_hit, semantic_hit)
-        items.append({
-            "category": category_name,
-            "prompt_index": int(row.get("prompt_index", 0) or 0),
-            "score_0_to_100": pct(item_score),
-            "evidence": concise(output),
-            "risk": item_score < 0.75,
-        })
-    return safe_mean([x["score_0_to_100"] / 100.0 for x in items]), items
+        item_score = score_boolean_style(output, refs)
+        items.append(
+            {
+                "category": category_name,
+                "group_id": str(row.get("group_id", "")),
+                "prompt_index": int(row.get("prompt_index", 0) or 0),
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(output),
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
+
+
+def score_parameter_sensitivity(df: pd.DataFrame) -> Tuple[float, List[Dict[str, Any]]]:
+    """Score per prompt across its temperature sweep, isolating temperature as the varied dimension."""
+    items: List[Dict[str, Any]] = []
+    for (grp_key, prompt_idx), grp in df.groupby(["group_id", "prompt_index"], dropna=False):
+        outputs = grp["output"].fillna("").astype(str).tolist()
+        item_score = pairwise_mean_cosine(outputs)
+        temperatures = []
+        if "temperature" in grp:
+            temperatures = sorted({float(t) for t in grp["temperature"].dropna().tolist()})
+        items.append(
+            {
+                "category": "parameter_sensitivity",
+                "group_id": str(grp_key),
+                "prompt_index": int(prompt_idx) if str(prompt_idx).isdigit() else prompt_idx,
+                "n_outputs": len(outputs),
+                "temperatures": temperatures,
+                "score_0_to_1": item_score,
+                "score_0_to_100": pct(item_score),
+                "evidence": concise(outputs[0]) if outputs else "",
+                "risk": item_score < 0.75,
+            }
+        )
+    return safe_mean([x["score_0_to_1"] for x in items]), items
 
 
 def aggregate_with_weights(category_scores: Dict[str, float]) -> float:
@@ -308,7 +406,7 @@ def aggregate_with_weights(category_scores: Dict[str, float]) -> float:
 
 
 def build_risk_flags(category_scores: Dict[str, float]) -> List[str]:
-    flags = []
+    flags: List[str] = []
     if category_scores.get("reasoning_stability", 1.0) < 0.75:
         flags.append("reasoning_instability_under_challenge")
     if category_scores.get("long_context", 1.0) < 0.75:
@@ -334,6 +432,8 @@ def main() -> None:
     df = pd.read_csv(RAW_OUTPUT_FILE)
     if "output" in df.columns:
         df["output"] = df["output"].fillna("").astype(str)
+    if "group_id" not in df.columns:
+        df["group_id"] = ""
 
     def subset(cat: str) -> pd.DataFrame:
         return df[df["category"] == cat].copy()
@@ -370,50 +470,62 @@ def main() -> None:
     category_confidences["user_pressure"] = category_confidence(items)
     item_analysis.extend(items)
 
-    category_scores["response_variance"], items = score_variance_like(subset("response_variance"), "response_variance")
+    category_scores["response_variance"], items = score_robustness(subset("response_variance"), "response_variance")
     category_confidences["response_variance"] = category_confidence(items)
     item_analysis.extend(items)
 
-    category_scores["parameter_sensitivity"], items = score_variance_like(subset("parameter_sensitivity"), "parameter_sensitivity")
+    category_scores["parameter_sensitivity"], items = score_parameter_sensitivity(subset("parameter_sensitivity"))
     category_confidences["parameter_sensitivity"] = category_confidence(items)
     item_analysis.extend(items)
 
-    weighted_score = aggregate_with_weights(category_scores)
+    weighted_score_0_to_1 = aggregate_with_weights(category_scores)
+    weighted_score_0_to_100 = pct(weighted_score_0_to_1)
     risk_flags = build_risk_flags(category_scores)
 
     summary_rows = []
     for category, weight in WEIGHTS.items():
-        score_100 = pct(category_scores[category])
-        summary_rows.append({
-            "category": category,
-            "score_0_to_1": round(category_scores[category], 4),
-            "score_0_to_100": score_100,
-            "weight": weight,
-            "confidence": category_confidences.get(category, 0.0),
-            "weighted_contribution": round(score_100 * weight, 4),
-            "risk_flag": score_100 < 75.0,
-        })
+        score_0_to_1 = float(category_scores[category])
+        score_0_to_100 = pct(score_0_to_1)
+        summary_rows.append(
+            {
+                "category": category,
+                "score_0_to_1": round(score_0_to_1, 4),
+                "score_0_to_100": score_0_to_100,
+                "weight": round(weight, 6),
+                "confidence": category_confidences.get(category, 0.0),
+                "weighted_contribution_0_to_1": round(score_0_to_1 * weight, 6),
+                "weighted_contribution_0_to_100": round(score_0_to_100 * weight, 4),
+                "risk_flag": score_0_to_100 < 75.0,
+            }
+        )
 
-    summary_rows.append({
-        "category": "final_reliability_score",
-        "score_0_to_1": round(weighted_score / 100.0, 4),
-        "score_0_to_100": round(weighted_score, 2),
-        "weight": 1.0,
-        "confidence": round(safe_mean(category_confidences.values()), 4),
-        "weighted_contribution": round(weighted_score, 4),
-        "risk_flag": bool(risk_flags),
-    })
+    summary_rows.append(
+        {
+            "category": "final_reliability_score",
+            "score_0_to_1": round(weighted_score_0_to_1, 4),
+            "score_0_to_100": round(weighted_score_0_to_100, 2),
+            "weight": 1.0,
+            "confidence": round(safe_mean(list(category_confidences.values())), 4),
+            "weighted_contribution_0_to_1": round(weighted_score_0_to_1, 6),
+            "weighted_contribution_0_to_100": round(weighted_score_0_to_100, 4),
+            "risk_flag": bool(risk_flags),
+        }
+    )
 
     pd.DataFrame(summary_rows).to_csv(SCORES_FILE, index=False)
 
     summary = {
+        "weights": WEIGHTS,
+        "category_scores_0_to_1": {k: round(float(v), 6) for k, v in category_scores.items()},
         "category_scores_0_to_100": {k: pct(v) for k, v in category_scores.items()},
         "category_confidence_0_to_1": category_confidences,
-        "weights": WEIGHTS,
-        "final_reliability_score_0_to_100": round(weighted_score, 2),
-        "overall_confidence_0_to_1": round(safe_mean(category_confidences.values()), 4),
+        "final_reliability_score_0_to_1": round(weighted_score_0_to_1, 6),
+        "final_reliability_score_0_to_100": round(weighted_score_0_to_100, 2),
+        "overall_confidence_0_to_1": round(safe_mean(list(category_confidences.values())), 4),
         "risk_flags": risk_flags,
         "sample_size": int(len(df)),
+        "embedding_model": EMBED_MODEL,
+        "weight_sum": round(sum(WEIGHTS.values()), 12),
     }
     SUMMARY_JSON.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     ITEM_ANALYSIS_JSON.write_text(json.dumps(item_analysis, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -423,6 +535,7 @@ def main() -> None:
         print(f"  {k}: {v}")
 
     print(f"\nFinal weighted reliability score: {summary['final_reliability_score_0_to_100']}/100")
+    print(f"Weight sum after normalization: {summary['weight_sum']}")
     if risk_flags:
         print("Risk flags:")
         for flag in risk_flags:
