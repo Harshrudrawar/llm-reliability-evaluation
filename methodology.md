@@ -104,15 +104,11 @@ Separating execution from scoring enables responses to be re-evaluated without r
 
 # 5. Scoring Methodology
 
-Each reliability dimension produces a normalized score
-
-[
-0 \le D_i \le 1
-]
+Each reliability dimension produces a normalized score between **0 and 1**.
 
 where
 
-(D_i) denotes the score of reliability dimension (i).
+- **D_i** = score of reliability dimension *i*
 
 ---
 
