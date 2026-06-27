@@ -188,22 +188,15 @@ Average semantic similarity across responses generated under multiple decoding t
 
 Each reliability dimension contributes to the final reliability score using normalized weights.
 
-[
-R_{final}=100\sum_i w_iD_i
-]
+**R_final = 100 × Σ(w_i × D_i)**
 
 where
 
-* (D_i) is the normalized score of dimension (i)
-* (w_i) is the normalized weight
+- **D_i** = normalized score of reliability dimension *i*
+- **w_i** = normalized weight of reliability dimension *i*
+- **Σw_i = 1**
 
-subject to
-
-[
-\sum_i w_i = 1
-]
-
-The final reliability score therefore lies between **0 and 100**.
+The final reliability score is therefore reported on a **0–100 scale**.
 
 ---
 
