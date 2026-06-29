@@ -176,8 +176,6 @@ results/
 
 ## Current Features
 
-## Current Features
-
 * Multi-dimensional reliability evaluation
 * Multi-provider evaluation (OpenAI and Anthropic)
 * Provider abstraction layer
