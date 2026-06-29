@@ -152,6 +152,7 @@ llm-reliability-evaluation/
 ├── README.md
 ├── requirements.txt
 └── results/
+
 ---
 
 ## Output Files
@@ -172,7 +173,7 @@ results/
 └── ...
 
 This prevents different benchmark runs from overwriting one another and improves experiment reproducibility.
-
+---
 ## Current Features
 
 * Multi-dimensional reliability evaluation
