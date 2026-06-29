@@ -152,63 +152,69 @@ llm-reliability-evaluation/
 ├── README.md
 ├── requirements.txt
 └── results/
-```text
+```
+
 ---
 
 ## Output Files
 
 Each benchmark execution produces:
 
-raw_outputs.csv
-experiment_manifest.json
-scores.csv
-summary.json
-item_analysis.json
+- `raw_outputs.csv`
+- `experiment_manifest.json`
+- `scores.csv`
+- `summary.json`
+- `item_analysis.json`
 
-Using RUN_LABEL, outputs are automatically organized into separate folders for each experiment, for example:
+Using `RUN_LABEL`, outputs are automatically organized into separate folders for each experiment, for example:
 
+```text
 results/
 ├── openai_gpt4o-mini_184/
 ├── anthropic_claude-sonnet-4-6_184/
 └── ...
+```
 
 This prevents different benchmark runs from overwriting one another and improves experiment reproducibility.
+
 ---
+
 ## Current Features
 
-* Multi-dimensional reliability evaluation
-* Multi-provider evaluation (OpenAI and Anthropic)
-* Provider abstraction layer
-* Dataset-driven benchmark generation
-* Expanded benchmark (~184 evaluation items)
-* Multi-turn reasoning evaluation
-* Prompt robustness analysis
-* Long-context evaluation
-* Embedding-based semantic scoring
-* Automatic benchmark generation from public datasets
-* Retry handling
-* Request timeout handling
-* Progress tracking
-* Partial result saving
-* Failure recovery
-* Per-run output organization
-* Automated report generation
-* Risk flag detection
-* Response provenance tracking
-* Separate generation and scoring pipeline
+- Multi-dimensional reliability evaluation
+- Multi-provider evaluation (OpenAI and Anthropic)
+- Provider abstraction layer
+- Dataset-driven benchmark generation
+- Expanded benchmark (~184 evaluation items)
+- Multi-turn reasoning evaluation
+- Prompt robustness analysis
+- Long-context evaluation
+- Embedding-based semantic scoring
+- Automatic benchmark generation from public datasets
+- Retry handling
+- Request timeout handling
+- Progress tracking
+- Partial result saving
+- Failure recovery
+- Per-run output organization
+- Automated report generation
+- Risk flag detection
+- Response provenance tracking
+- Separate generation and scoring pipeline
+
 ---
 
 ## Current Limitations
 
-This repository represents a research prototype.
+This repository represents an active research prototype.
 
 Current limitations include:
 
-* Semantic similarity scoring currently depends on OpenAI embeddings.
-* Human evaluation has not yet been incorporated.
-* Statistical significance testing is not yet included.
-* Benchmark size will continue to expand using additional public datasets.
-* Gemini integration is planned but not yet implemented.
+- Semantic similarity scoring currently depends on OpenAI embeddings.
+- Human evaluation has not yet been incorporated.
+- Statistical significance testing is not yet included.
+- Benchmark size will continue to expand using additional public datasets.
+- Gemini integration is planned but not yet implemented.
 
 These limitations are intentionally documented to support future development.
 
@@ -218,24 +224,25 @@ These limitations are intentionally documented to support future development.
 
 Planned improvements include:
 
-* Gemini provider integration
-* Provider-independent/local embedding backend
-* Larger benchmark datasets
-* Statistical confidence intervals
-* Human evaluation studies
-* Cross-provider comparative analysis
-* Benchmark packaging
-* Integration into the broader AI Trust platform
+- Gemini provider integration
+- Provider-independent or local embedding backend
+- Larger benchmark datasets
+- Statistical confidence intervals
+- Human evaluation studies
+- Cross-provider comparative analysis
+- Benchmark packaging
+- Integration into the broader AI Trust platform
+
 ---
 
 ## Integration
 
 The Reliability Evaluation Module is designed to become one component of a larger AI Trust Evaluation Framework alongside:
 
-* Veracity Evaluation
-* Manipulation Detection
-* Cultural Sensitivity
-* Psychological Safety
+- Veracity Evaluation
+- Manipulation Detection
+- Cultural Sensitivity
+- Psychological Safety
 
 ---
 
