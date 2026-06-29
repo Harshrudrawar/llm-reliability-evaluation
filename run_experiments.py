@@ -2,16 +2,16 @@ import csv
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from openai import OpenAI
+from providers import get_provider
 
 # ============================================================
 # Config
 # ============================================================
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 RUNS = int(os.getenv("RUNS_PER_PROMPT", "5"))
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
 TEMPERATURES = [0.0, 0.2, 0.7, 1.0]
@@ -19,13 +19,21 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("RETRY_BACKOFF_SECONDS", "2.0"))
 SEED = int(os.getenv("SEED", "42"))
 
-PROMPTS_FILE = Path("prompts.json")
-RESULTS_DIR = Path("results")
-RESULTS_DIR.mkdir(exist_ok=True)
+# Observability / robustness knobs
+PROGRESS_EVERY = int(os.getenv("PROGRESS_EVERY", "25"))  # print elapsed every N calls
+SAVE_EVERY = int(os.getenv("SAVE_EVERY", "10"))          # flush partial CSV every N calls
+FAILED_PLACEHOLDER = "[API_CALL_FAILED]"
+
+PROMPTS_FILE = Path(os.getenv("PROMPTS_FILE", "prompts.json"))
+# When RUN_LABEL is set, each run gets its own results/<RUN_LABEL>/ folder so
+# multiple model runs never overwrite each other. Unset -> legacy results/ path.
+RUN_LABEL = os.getenv("RUN_LABEL", "").strip()
+RESULTS_DIR = Path("results") / RUN_LABEL if RUN_LABEL else Path("results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 RAW_OUTPUT_FILE = RESULTS_DIR / "raw_outputs.csv"
 MANIFEST_FILE = RESULTS_DIR / "experiment_manifest.json"
 
-client = OpenAI()
+provider = get_provider()
 random.seed(SEED)
 
 CSV_FIELDS = [
@@ -44,7 +52,56 @@ CSV_FIELDS = [
     "previous_response_id",
     "response_id",
     "output",
+    "error",  # additive, trailing column; empty on success (existing columns unchanged)
 ]
+
+BAR = "=" * 36
+
+
+# ============================================================
+# Run statistics / progress
+# ============================================================
+class RunStats:
+    def __init__(self) -> None:
+        self.total = 0
+        self.success = 0
+        self.failed = 0
+        self.start = time.monotonic()
+
+
+STATS = RunStats()
+
+
+def fmt_elapsed(seconds: float) -> str:
+    s = int(round(seconds))
+    return f"{s // 60}m {s % 60}s"
+
+
+def banner(title: str) -> None:
+    print()
+    print(BAR)
+    print(title)
+    print(BAR, flush=True)
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def record_call(rows: List[Dict[str, Any]], ok: bool) -> None:
+    """Bookkeeping after every API call: counts, periodic partial save, periodic timing."""
+    STATS.total += 1
+    if ok:
+        STATS.success += 1
+    else:
+        STATS.failed += 1
+
+    if SAVE_EVERY > 0 and STATS.total % SAVE_EVERY == 0:
+        save_rows(rows, RAW_OUTPUT_FILE)
+
+    if PROGRESS_EVERY > 0 and STATS.total % PROGRESS_EVERY == 0:
+        elapsed = time.monotonic() - STATS.start
+        log(f"Completed {STATS.total} API calls | elapsed {fmt_elapsed(elapsed)}")
 
 
 # ============================================================
@@ -89,31 +146,31 @@ def call_model(
     prompt: str,
     temperature: float = DEFAULT_TEMPERATURE,
     previous_response_id: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Call the Responses API with lightweight retry handling."""
+) -> Tuple[str, str, str]:
+    """Generate one response via the selected provider, with lightweight retry.
+
+    Never raises: on permanent failure (after MAX_RETRIES, including timeouts) it
+    returns the FAILED_PLACEHOLDER output and a non-empty error string so the
+    benchmark can record the failure and continue. Returns (output, response_id, error).
+    """
     last_error: Optional[Exception] = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            kwargs = {
-                "model": MODEL,
-                "input": prompt,
-                "temperature": temperature,
-            }
-            if previous_response_id:
-                kwargs["previous_response_id"] = previous_response_id
-
-            response = client.responses.create(**kwargs)
-            output_text = (response.output_text or "").strip()
-            response_id = getattr(response, "id", "")
-            return output_text, response_id
-        except Exception as exc:  # pragma: no cover - surfaced to user if API fails
+            output, response_id = provider.generate(
+                prompt,
+                temperature=temperature,
+                previous_response_id=previous_response_id,
+            )
+            return output, response_id, ""
+        except Exception as exc:  # noqa: BLE001 - any provider/transport error (incl. timeouts)
             last_error = exc
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(f"Model call failed after {MAX_RETRIES} attempts: {exc}") from exc
-            time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
-    raise RuntimeError(f"Model call failed: {last_error}")
+    error = f"{type(last_error).__name__}: {last_error}"
+    print(f"  [error] API call failed after {MAX_RETRIES} attempts: {error}", file=sys.stderr, flush=True)
+    return FAILED_PLACEHOLDER, "", error
 
 
 def append_row(rows: List[Dict[str, Any]], row: Dict[str, Any]) -> None:
@@ -137,6 +194,7 @@ def make_row(
     previous_response_id: str = "",
     response_id: str = "",
     output: str = "",
+    error: str = "",
 ) -> Dict[str, Any]:
     return {
         "category": category,
@@ -154,6 +212,7 @@ def make_row(
         "previous_response_id": previous_response_id,
         "response_id": response_id,
         "output": output,
+        "error": error,
     }
 
 
@@ -169,7 +228,9 @@ def save_rows(rows: List[Dict[str, Any]], path: Path) -> None:
 
 def save_manifest(prompts_data: Dict[str, Any], path: Path) -> None:
     manifest = {
-        "model": MODEL,
+        "run_label": RUN_LABEL,
+        "provider": provider.name,
+        "model": provider.model,
         "runs_per_prompt": RUNS,
         "default_temperature": DEFAULT_TEMPERATURE,
         "temperatures": TEMPERATURES,
@@ -199,11 +260,13 @@ def make_long_context_prompt(context: str, question: str) -> str:
 # Experiment runners
 # ============================================================
 def run_consistency(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
         group_id = get_group_id("consistency", item, prompt_idx)
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+            log(f"Consistency prompt {prompt_idx}/{n} | run {run_idx}/{RUNS}")
+            output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             append_row(
                 rows,
                 make_row(
@@ -215,16 +278,20 @@ def run_consistency(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                     prompt=prompt,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
 
 
 def run_robustness(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     """Run each paraphrase once, but give the scorer a shared group_id for the set."""
+    n = len(items)
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
         group_id = get_group_id("robustness", item, prompt_idx, fallback="robustness:shared")
-        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+        log(f"Robustness: {prompt_idx}/{n}")
+        output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
         append_row(
             rows,
             make_row(
@@ -236,11 +303,14 @@ def run_robustness(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                 prompt=prompt,
                 output=output,
                 response_id=response_id,
+                error=error,
             ),
         )
+        record_call(rows, error == "")
 
 
 def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for item_idx, item in enumerate(items, start=1):
         spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
@@ -250,7 +320,8 @@ def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) ->
 
         last_response_id = ""
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+            log(f"Reasoning prompt {item_idx}/{n} | initial run {run_idx}/{RUNS}")
+            output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             last_response_id = response_id
             append_row(
                 rows,
@@ -265,11 +336,14 @@ def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) ->
                     reference=answer,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
 
         challenged_prompt = challenge or "Please reconsider your answer."
-        challenged_output, challenged_response_id = call_model(
+        log(f"Reasoning prompt {item_idx}/{n} | challenge")
+        challenged_output, challenged_response_id, error = call_model(
             challenged_prompt,
             temperature=DEFAULT_TEMPERATURE,
             previous_response_id=last_response_id,
@@ -288,23 +362,28 @@ def run_reasoning_stability(items: Sequence[Any], rows: List[Dict[str, Any]]) ->
                 previous_response_id=last_response_id,
                 output=challenged_output,
                 response_id=challenged_response_id,
+                error=error,
             ),
         )
+        record_call(rows, error == "")
 
 
 def run_long_context(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for item_idx, item in enumerate(items, start=1):
         spec = as_dict(item)
         context = str(spec.get("context", "")).strip()
         questions = spec.get("questions", [])
         group_id = get_group_id("long_context", item, item_idx)
+        q_total = len(questions)
 
         for q_idx, qspec in enumerate(questions, start=1):
             qspec = as_dict(qspec)
             question = str(qspec.get("question", "")).strip()
             answers = qspec.get("answers", [])
             full_prompt = make_long_context_prompt(context, question)
-            output, response_id = call_model(full_prompt, temperature=DEFAULT_TEMPERATURE)
+            log(f"Long Context passage {item_idx}/{n} | question {q_idx}/{q_total}")
+            output, response_id, error = call_model(full_prompt, temperature=DEFAULT_TEMPERATURE)
             append_row(
                 rows,
                 make_row(
@@ -320,17 +399,21 @@ def run_long_context(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                     reference=answers,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
 
 
 def run_edge_case(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for prompt_idx, item in enumerate(items, start=1):
         spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         expected = stringify_reference(spec.get("expected", ""))
         group_id = get_group_id("edge_case", item, prompt_idx)
-        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+        log(f"Edge Case: {prompt_idx}/{n}")
+        output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
         append_row(
             rows,
             make_row(
@@ -343,17 +426,21 @@ def run_edge_case(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                 reference=expected,
                 output=output,
                 response_id=response_id,
+                error=error,
             ),
         )
+        record_call(rows, error == "")
 
 
 def run_uncertainty_calibration(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for prompt_idx, item in enumerate(items, start=1):
         spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
         expected = stringify_reference(spec.get("expected", ""))
         group_id = get_group_id("uncertainty_calibration", item, prompt_idx)
-        output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+        log(f"Uncertainty Calibration: {prompt_idx}/{n}")
+        output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
         append_row(
             rows,
             make_row(
@@ -366,11 +453,14 @@ def run_uncertainty_calibration(items: Sequence[Any], rows: List[Dict[str, Any]]
                 reference=expected,
                 output=output,
                 response_id=response_id,
+                error=error,
             ),
         )
+        record_call(rows, error == "")
 
 
 def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for item_idx, item in enumerate(items, start=1):
         spec = as_dict(item)
         prompt = str(spec.get("prompt", "")).strip()
@@ -380,7 +470,8 @@ def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
 
         last_response_id = ""
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+            log(f"User Pressure prompt {item_idx}/{n} | initial run {run_idx}/{RUNS}")
+            output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             last_response_id = response_id
             append_row(
                 rows,
@@ -395,11 +486,14 @@ def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                     reference=answer,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
 
         pressure_prompt = challenge or "Please confirm my incorrect statement."
-        pressured_output, pressured_response_id = call_model(
+        log(f"User Pressure prompt {item_idx}/{n} | challenge")
+        pressured_output, pressured_response_id, error = call_model(
             pressure_prompt,
             temperature=DEFAULT_TEMPERATURE,
             previous_response_id=last_response_id,
@@ -418,18 +512,22 @@ def run_user_pressure(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
                 previous_response_id=last_response_id,
                 output=pressured_output,
                 response_id=pressured_response_id,
+                error=error,
             ),
         )
+        record_call(rows, error == "")
 
 
 def run_response_variance(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
     """Run variants under a shared group so the scorer can compare phrasing diversity."""
+    n = len(items)
     shared_group = "response_variance:shared"
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
         group_id = get_group_id("response_variance", item, prompt_idx, fallback=shared_group)
         for run_idx in range(1, RUNS + 1):
-            output, response_id = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
+            log(f"Response Variance prompt {prompt_idx}/{n} | run {run_idx}/{RUNS}")
+            output, response_id, error = call_model(prompt, temperature=DEFAULT_TEMPERATURE)
             append_row(
                 rows,
                 make_row(
@@ -441,16 +539,20 @@ def run_response_variance(items: Sequence[Any], rows: List[Dict[str, Any]]) -> N
                     prompt=prompt,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
 
 
 def run_parameter_sensitivity(items: Sequence[Any], rows: List[Dict[str, Any]]) -> None:
+    n = len(items)
     for prompt_idx, item in enumerate(items, start=1):
         prompt = get_item_prompt(item)
         group_id = get_group_id("parameter_sensitivity", item, prompt_idx)
         for temp in TEMPERATURES:
-            output, response_id = call_model(prompt, temperature=temp)
+            log(f"Parameter Sensitivity prompt {prompt_idx}/{n} | temperature {temp}")
+            output, response_id, error = call_model(prompt, temperature=temp)
             append_row(
                 rows,
                 make_row(
@@ -463,40 +565,64 @@ def run_parameter_sensitivity(items: Sequence[Any], rows: List[Dict[str, Any]]) 
                     prompt=prompt,
                     output=output,
                     response_id=response_id,
+                    error=error,
                 ),
             )
+            record_call(rows, error == "")
+
+
+# Ordered dispatch table: (json key, display name, runner). Order/logic preserved.
+RUNNERS = [
+    ("consistency", "Consistency", run_consistency),
+    ("robustness", "Robustness", run_robustness),
+    ("reasoning_stability", "Reasoning Stability", run_reasoning_stability),
+    ("long_context", "Long Context", run_long_context),
+    ("edge_case", "Edge Case", run_edge_case),
+    ("uncertainty_calibration", "Uncertainty Calibration", run_uncertainty_calibration),
+    ("user_pressure", "User Pressure", run_user_pressure),
+    ("response_variance", "Response Variance", run_response_variance),
+    ("parameter_sensitivity", "Parameter Sensitivity", run_parameter_sensitivity),
+]
 
 
 # ============================================================
 # Main
 # ============================================================
 def main() -> None:
+    print("=" * 40)
+    print("Run Label:")
+    print(RUN_LABEL if RUN_LABEL else "(default - results/)")
+    print("=" * 40, flush=True)
+
     prompts_data = load_prompts(PROMPTS_FILE)
     rows: List[Dict[str, Any]] = []
+    STATS.start = time.monotonic()
 
-    if "consistency" in prompts_data:
-        run_consistency(prompts_data["consistency"], rows)
-    if "robustness" in prompts_data:
-        run_robustness(prompts_data["robustness"], rows)
-    if "reasoning_stability" in prompts_data:
-        run_reasoning_stability(prompts_data["reasoning_stability"], rows)
-    if "long_context" in prompts_data:
-        run_long_context(prompts_data["long_context"], rows)
-    if "edge_case" in prompts_data:
-        run_edge_case(prompts_data["edge_case"], rows)
-    if "uncertainty_calibration" in prompts_data:
-        run_uncertainty_calibration(prompts_data["uncertainty_calibration"], rows)
-    if "user_pressure" in prompts_data:
-        run_user_pressure(prompts_data["user_pressure"], rows)
-    if "response_variance" in prompts_data:
-        run_response_variance(prompts_data["response_variance"], rows)
-    if "parameter_sensitivity" in prompts_data:
-        run_parameter_sensitivity(prompts_data["parameter_sensitivity"], rows)
+    for key, display, runner in RUNNERS:
+        if key in prompts_data:
+            banner(f"Running {display}...")
+            runner(prompts_data[key], rows)
 
     save_rows(rows, RAW_OUTPUT_FILE)
     save_manifest(prompts_data, MANIFEST_FILE)
+
+    elapsed = time.monotonic() - STATS.start
+    print()
+    print(BAR)
+    print("Benchmark Complete")
+    print(BAR)
+    print()
+    print(f"Total API calls: {STATS.total}")
+    print(f"Successful:      {STATS.success}")
+    print(f"Failed:          {STATS.failed}")
+    print(f"Elapsed time:    {fmt_elapsed(elapsed)}")
+    print()
     print(f"Saved {len(rows)} rows to {RAW_OUTPUT_FILE}")
     print(f"Saved experiment manifest to {MANIFEST_FILE}")
+    print()
+    print("Results saved to:")
+    print()
+    print(f"{RESULTS_DIR.as_posix()}/")
 
 
 if __name__ == "__main__":

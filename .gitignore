@@ -11,6 +11,7 @@ env/
 
 # Output files (generated results)
 results/
+results/**/
 *.csv
 
 # VS Code settings

@@ -16,7 +16,10 @@ from openai import OpenAI
 # Config
 # ============================================================
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-RESULTS_DIR = Path("results")
+FAILED_PLACEHOLDER = "[API_CALL_FAILED]"  # matches run_experiments.py; these rows are skipped
+# Read/write within results/<RUN_LABEL>/ when set, matching run_experiments.py.
+RUN_LABEL = os.getenv("RUN_LABEL", "").strip()
+RESULTS_DIR = Path("results") / RUN_LABEL if RUN_LABEL else Path("results")
 RAW_OUTPUT_FILE = RESULTS_DIR / "raw_outputs.csv"
 SCORES_FILE = RESULTS_DIR / "scores.csv"
 SUMMARY_JSON = RESULTS_DIR / "summary.json"
@@ -434,6 +437,15 @@ def main() -> None:
         df["output"] = df["output"].fillna("").astype(str)
     if "group_id" not in df.columns:
         df["group_id"] = ""
+
+    # Exclude failed API calls (placeholder output, or a recorded error) from scoring.
+    failed_mask = df["output"].str.strip() == FAILED_PLACEHOLDER
+    if "error" in df.columns:
+        failed_mask = failed_mask | (df["error"].fillna("").astype(str).str.strip() != "")
+    n_failed = int(failed_mask.sum())
+    if n_failed:
+        print(f"Excluding {n_failed} failed API call row(s) from scoring.")
+        df = df[~failed_mask].copy()
 
     def subset(cat: str) -> pd.DataFrame:
         return df[df["category"] == cat].copy()
