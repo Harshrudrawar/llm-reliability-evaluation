@@ -172,7 +172,6 @@ results/
 └── ...
 
 This prevents different benchmark runs from overwriting one another and improves experiment reproducibility.
----
 
 ## Current Features
 
