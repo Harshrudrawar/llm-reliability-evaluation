@@ -174,6 +174,8 @@ results/
 ├── anthropic_claude-sonnet-4-6_184/
 └── ...
 
+---
+
 ## Current Features
 
 * Multi-dimensional reliability evaluation
