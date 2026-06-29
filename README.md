@@ -142,11 +142,15 @@ Measures stability under different decoding temperatures.
 
 ```text
 llm-reliability-evaluation/
-├── prompts.json
-├── run_experiments.py
-├── score_results.py
+├── prompts.json                     # Prototype benchmark
+├── prompts_benchmark.json           # Expanded benchmark (~184 evaluation items)
+├── build_benchmark.py               # Benchmark generation from public datasets
+├── providers.py                     # Multi-provider abstraction
+├── run_experiments.py               # Benchmark execution
+├── score_results.py                 # Reliability scoring
 ├── methodology.md
 ├── README.md
+├── requirements.txt
 └── results/
 ```
 
@@ -154,7 +158,7 @@ llm-reliability-evaluation/
 
 ## Output Files
 
-Running the framework produces:
+Each benchmark execution produces:
 
 * raw_outputs.csv
 * experiment_manifest.json
@@ -162,22 +166,38 @@ Running the framework produces:
 * summary.json
 * item_analysis.json
 
-These artifacts preserve both raw evidence and summarized reliability metrics.
+Using `RUN_LABEL`, outputs are automatically organized into separate folders for each experiment, for example:
 
----
+```text
+results/
+├── openai_gpt4o-mini_184/
+├── anthropic_claude-sonnet-4-6_184/
+└── ...
+
+## Current Features
 
 ## Current Features
 
 * Multi-dimensional reliability evaluation
+* Multi-provider evaluation (OpenAI and Anthropic)
+* Provider abstraction layer
+* Dataset-driven benchmark generation
+* Expanded benchmark (~184 evaluation items)
 * Multi-turn reasoning evaluation
 * Prompt robustness analysis
 * Long-context evaluation
 * Embedding-based semantic scoring
+* Automatic benchmark generation from public datasets
+* Retry handling
+* Request timeout handling
+* Progress tracking
+* Partial result saving
+* Failure recovery
+* Per-run output organization
 * Automated report generation
 * Risk flag detection
 * Response provenance tracking
 * Separate generation and scoring pipeline
-
 ---
 
 ## Current Limitations
@@ -186,13 +206,13 @@ This repository represents a research prototype.
 
 Current limitations include:
 
-* Prototype-scale benchmark dataset
-* Single-provider implementation
-* Embedding-based automated scoring
-* Limited statistical validation
-* No human evaluation calibration
+* Semantic similarity scoring currently depends on OpenAI embeddings.
+* Human evaluation has not yet been incorporated.
+* Statistical significance testing is not yet included.
+* Benchmark size will continue to expand using additional public datasets.
+* Gemini integration is planned but not yet implemented.
 
-These limitations are documented explicitly to encourage future improvements.
+These limitations are intentionally documented to support future development.
 
 ---
 
@@ -200,14 +220,14 @@ These limitations are documented explicitly to encourage future improvements.
 
 Planned improvements include:
 
-* Multi-model evaluation (GPT, Claude, Gemini)
+* Gemini provider integration
+* Provider-independent/local embedding backend
 * Larger benchmark datasets
 * Statistical confidence intervals
-* Human-in-the-loop evaluation
-* Provider abstraction layer
+* Human evaluation studies
+* Cross-provider comparative analysis
 * Benchmark packaging
 * Integration into the broader AI Trust platform
-
 ---
 
 ## Integration
