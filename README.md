@@ -152,28 +152,26 @@ llm-reliability-evaluation/
 ├── README.md
 ├── requirements.txt
 └── results/
-```
-
 ---
 
 ## Output Files
 
 Each benchmark execution produces:
 
-* raw_outputs.csv
-* experiment_manifest.json
-* scores.csv
-* summary.json
-* item_analysis.json
+raw_outputs.csv
+experiment_manifest.json
+scores.csv
+summary.json
+item_analysis.json
 
-Using `RUN_LABEL`, outputs are automatically organized into separate folders for each experiment, for example:
+Using RUN_LABEL, outputs are automatically organized into separate folders for each experiment, for example:
 
-```text
 results/
 ├── openai_gpt4o-mini_184/
 ├── anthropic_claude-sonnet-4-6_184/
 └── ...
 
+This prevents different benchmark runs from overwriting one another and improves experiment reproducibility.
 ---
 
 ## Current Features
