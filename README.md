@@ -4,6 +4,8 @@
 
 This project implements a structured evaluation framework for measuring the reliability of Large Language Models (LLMs). Unlike traditional evaluation approaches that primarily focus on accuracy, this framework evaluates reliability as a multi-dimensional behavioral property.
 
+The framework supports multiple generation providers — **OpenAI**, **Anthropic**, and **Google Gemini** — through a shared provider interface, so the same benchmark can be run across models. It has been validated on OpenAI and Anthropic; Gemini is implemented and runs through the same interface, though large-scale Gemini runs may require sufficient API quota or a paid plan, since the free tier can hit rate/quota limits.
+
 The module assesses how consistently and robustly an LLM behaves under repeated queries, prompt variations, reasoning challenges, long-context inputs, uncertainty, user pressure, and generation parameter changes.
 
 The implementation follows a **generate → score** pipeline, allowing model responses to be collected once and re-scored multiple times without repeating API calls.
@@ -57,7 +59,7 @@ The evaluation consists of two independent stages.
 ### Stage 1 — Experiment Execution
 
 * Load benchmark prompts
-* Execute prompts through the selected LLM
+* Execute prompts through the selected provider (OpenAI, Anthropic, or Gemini)
 * Store every response in a structured CSV
 * Preserve conversation chains for multi-turn evaluations
 * Save experiment metadata
@@ -182,7 +184,7 @@ This prevents different benchmark runs from overwriting one another and improves
 ## Current Features
 
 - Multi-dimensional reliability evaluation
-- Multi-provider evaluation (OpenAI and Anthropic)
+- Multi-provider evaluation (OpenAI, Anthropic, and Gemini)
 - Provider abstraction layer
 - Dataset-driven benchmark generation
 - Expanded benchmark (~184 evaluation items)
@@ -214,7 +216,6 @@ Current limitations include:
 - Human evaluation has not yet been incorporated.
 - Statistical significance testing is not yet included.
 - Benchmark size will continue to expand using additional public datasets.
-- Gemini integration is planned but not yet implemented.
 
 These limitations are intentionally documented to support future development.
 
@@ -224,7 +225,6 @@ These limitations are intentionally documented to support future development.
 
 Planned improvements include:
 
-- Gemini provider integration
 - Provider-independent or local embedding backend
 - Larger benchmark datasets
 - Statistical confidence intervals

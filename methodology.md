@@ -4,6 +4,10 @@
 
 This work proposes a structured methodology for evaluating the reliability of Large Language Models (LLMs) as a **multi-dimensional behavioral property**. Rather than measuring only factual accuracy, the framework evaluates the consistency, robustness, and stability of model behavior across diverse interaction scenarios.
 
+The methodology is provider-agnostic: the same benchmark is evaluated across multiple model providers — currently **OpenAI**, **Anthropic**, and **Google Gemini** — through a shared generation interface, so that reliability can be compared across models under identical conditions.
+
+The benchmark is dataset-driven and reproducible: items are derived from established public datasets together with a fixed seed set, allowing the evaluation set to be regenerated deterministically.
+
 The methodology is designed as a modular evaluation component that can be integrated into a broader AI Trust Evaluation Framework.
 
 ---
@@ -83,7 +87,7 @@ The methodology follows a two-stage evaluation process.
 ## Stage 1 — Experiment Execution
 
 1. Load benchmark prompts.
-2. Execute prompts using the target LLM.
+2. Execute prompts using the selected provider (OpenAI, Anthropic, or Gemini).
 3. Store all responses.
 4. Preserve conversation state for multi-turn tasks.
 5. Record experiment metadata.
@@ -222,7 +226,7 @@ The present implementation remains a research prototype.
 Current limitations include
 
 * prototype-scale benchmark
-* single-provider implementation
+* generation supports OpenAI, Anthropic, and Gemini; embedding-based scoring still requires OpenAI
 * embedding-based automatic scoring
 * limited statistical validation
 * no human evaluation calibration
@@ -234,10 +238,9 @@ Current limitations include
 Future work includes
 
 * larger benchmark datasets
-* multi-model evaluation
+* cross-provider comparative analysis
 * confidence interval estimation
 * human-in-the-loop validation
-* provider abstraction
 * benchmark packaging
 * integration into the AI Trust platform
 
